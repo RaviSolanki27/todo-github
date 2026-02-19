@@ -3,7 +3,7 @@ name: Deploy Next.js App on EC2 (Self-Hosted Runner)
 on:
   push:
     branches:
-      - main
+      - master
   workflow_dispatch:
 
 jobs:
