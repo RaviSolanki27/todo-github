@@ -1,0 +1,89 @@
+name: Build and Deploy to EC2
+
+on:
+  # Trigger deployment on pushes to main.
+  push:
+    branches:
+      - main
+  # Allow manual deployments from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1) Checkout repository code into the GitHub runner.
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # 2) Install Node.js on the runner and enable npm cache.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # 3) Install dependencies in a clean, reproducible way.
+      - name: Install dependencies
+        run: npm ci
+
+      # 4) Build Next.js app to validate production readiness before deploy.
+      - name: Build application
+        run: npm run build
+
+      # 5) Connect to EC2 over SSH and perform in-place deployment.
+      - name: Deploy on EC2 with PM2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+
+            # App location on EC2.
+            APP_DIR="/var/www/nextjs-todo-app"
+            REPO_URL="https://github.com/${{ github.repository }}.git"
+            BRANCH="${{ github.ref_name }}"
+
+            # Create base directory if needed.
+            sudo mkdir -p "$(dirname "$APP_DIR")"
+
+            # Clone on first deploy, otherwise pull latest code.
+            if [ ! -d "$APP_DIR/.git" ]; then
+              sudo git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
+            else
+              cd "$APP_DIR"
+              sudo git fetch origin "$BRANCH"
+              sudo git checkout "$BRANCH"
+              sudo git pull origin "$BRANCH"
+            fi
+
+            cd "$APP_DIR"
+
+            # Install dependencies and build on EC2.
+            sudo npm ci
+            sudo npm run build
+
+            # Ensure PM2 is available on the instance.
+            if ! command -v pm2 >/dev/null 2>&1; then
+              sudo npm install -g pm2
+            fi
+
+            # Ensure .env exists (Next.js loads .env automatically at runtime).
+            if [ ! -f ".env" ]; then
+              echo ".env file not found in $APP_DIR. Add it on EC2 before first run."
+              exit 1
+            fi
+
+            # Start or reload app via PM2.
+            if pm2 describe nextjs-app >/dev/null 2>&1; then
+              pm2 restart nextjs-app --update-env
+            else
+              pm2 start npm --name "nextjs-app" -- start
+            fi
+
+            # Persist PM2 process list across server reboots.
+            pm2 save
